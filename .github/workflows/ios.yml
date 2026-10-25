@@ -1,0 +1,242 @@
+name: ios-testflight
+# İlkay'ın Expo uygulamaları için ortak iOS derlemesi -> TestFlight.
+#
+# Neden herkese açık depo: GitHub'ın Mac makineleri herkese açık depolarda ücretsizdir. Uygulamaların
+# kaynağı kendi GİZLİ depolarında kalır ve yalnız derleme sırasında okunur; bu depoda kod ve sır yoktur.
+# Sırlar (Settings > Secrets) yalnız bu iş akışına açılır; çatallar ve dışarıdan PR'lar göremez; iş
+# yalnız elle tetiklenir. IPA herkese açık yüklenmez, doğrudan App Store Connect'e gider ve iş sonunda
+# silinir. Sırları sahibi kendi bilgisayarında C:\aih\skills\mobil-ios-build\sirlari-yaz.ps1 ile yazar.
+#
+# Uygulama kaydı aşağıdaki "Uygulama" adımındadır: yeni uygulama = yeni bir `case` + sır betiğindeki
+# apps.json satırı.
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'Uygulama'
+        type: choice
+        options: [trader-mobile, nucum, sentineltime]
+      ref:
+        description: 'Dal ya da commit (boş = uygulamanın varsayılan dalı)'
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ inputs.app }}
+  cancel-in-progress: false
+
+env:
+  CI: "1"
+  EXPO_NO_TELEMETRY: "1"
+  # App Store Connect ekip anahtarı (kimliği gizli değil; içeriği ASC_API_KEY_P8 sırrında).
+  ASC_KEY_ID: CXPU6U2KBL
+  ASC_ISSUER_ID: 5b6c9543-dce8-438d-8c9e-194a3b31de36
+  # Bu adresler her uygulamanın iç test grubunda bulunur (yoksa eklenir).
+  OWNER_TESTERS: ilkayt1919@icloud.com
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 100
+    steps:
+      - name: Uygulama
+        id: app
+        run: |
+          set -euo pipefail
+          case "${{ inputs.app }}" in
+            trader-mobile) repo=ilkayturna/Trader-Mobile; branch=master; subdir=.;      envfile=.env.local; envkey=TRADER_MOBILE; asc=6824197050 ;;
+            # Nücum ve SentinelTime üretim EXPO_PUBLIC_ değerlerini eas.json'daki production profilinden
+            # alır; yerel .env'leri (geliştirme adresleri, sunucu anahtarları) derlemeye asla girmez.
+            nucum)         repo=ilkayturna/Nuc-m;         branch=main;   subdir=.;      envfile=-;          envkey=NONE;          asc=6781225793 ;;
+            sentineltime)  repo=ilkayturna/Jira-Worklog;  branch=main;   subdir=mobile; envfile=-;          envkey=NONE;          asc=6806598315 ;;
+            *) echo "::error::Kayıtsız uygulama: ${{ inputs.app }}"; exit 1 ;;
+          esac
+          ref="${{ inputs.ref }}"; [ -n "$ref" ] || ref="$branch"
+          { echo "repo=$repo"; echo "ref=$ref"; echo "subdir=$subdir"; echo "envfile=$envfile"; echo "envkey=$envkey"; echo "asc=$asc"; } >> "$GITHUB_OUTPUT"
+          echo "Uygulama ${{ inputs.app }} <- $repo@$ref ($subdir)"
+
+      - name: Sırlar tanımlı mı
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          EXPO_STATE_JSON: ${{ secrets.EXPO_STATE_JSON }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          missing=""
+          for name in PRIVATE_REPO_TOKEN EXPO_STATE_JSON ASC_API_KEY_P8; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Eksik sır:$missing. Sahibin bilgisayarında C:\\aih\\skills\\mobil-ios-build\\sirlari-yaz.ps1 çalıştırılır."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.app.outputs.repo }}
+          ref: ${{ steps.app.outputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: src
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Bağımlılıklar
+        working-directory: src/${{ steps.app.outputs.subdir }}
+        run: npm ci
+
+      - name: Uygulamanın EXPO_PUBLIC_ ayarları (derleme anında pakete girer)
+        working-directory: src/${{ steps.app.outputs.subdir }}
+        env:
+          APP_ENV: ${{ secrets[format('ENV_{0}', steps.app.outputs.envkey)] }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.app.outputs.envkey }}" = "NONE" ]; then
+            echo "Bu uygulama ayarlarını eas.json production profilinden alır; ortam sırrı kullanılmaz."
+          elif [ -n "${APP_ENV}" ]; then
+            umask 077
+            printf '%s\n' "${APP_ENV}" > "${{ steps.app.outputs.envfile }}"
+            echo "$(grep -c '^EXPO_PUBLIC_' "${{ steps.app.outputs.envfile }}" || true) EXPO_PUBLIC_ satırı yazıldı -> ${{ steps.app.outputs.envfile }}"
+          else
+            echo "::error::ENV_${{ steps.app.outputs.envkey }} sırrı yok; sirlari-yaz.ps1 bu uygulamanın ortam dosyasını yazmalı."
+            exit 1
+          fi
+
+      - name: Expo oturumu
+        env:
+          EXPO_STATE_JSON: ${{ secrets.EXPO_STATE_JSON }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.expo"
+          umask 077
+          printf '%s' "$EXPO_STATE_JSON" > "$HOME/.expo/state.json"
+          if ! python3 -c 'import json,os; json.load(open(os.path.expanduser("~/.expo/state.json")))' 2>/dev/null; then
+            echo "::error::EXPO_STATE_JSON geçerli JSON değil (tırnaklar kaybolmuş olabilir). sirlari-yaz.ps1 betiğini yeniden çalıştır."
+            exit 1
+          fi
+          npx --yes eas-cli@latest whoami
+
+      - name: App Store Connect anahtarı ve yardımcı
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$ASC_API_KEY_P8" > "$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          cat > "$RUNNER_TEMP/asc.mjs" <<'JS'
+          // Minimal App Store Connect API call with the team key: node asc.mjs METHOD PATH [JSON]
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          const [, , method, path, body] = process.argv;
+          const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+          const now = Math.floor(Date.now() / 1000);
+          const unsigned = `${b64({ alg: 'ES256', kid: process.env.ASC_KEY_ID, typ: 'JWT' })}.${b64({ iss: process.env.ASC_ISSUER_ID, iat: now, exp: now + 600, aud: 'appstoreconnect-v1' })}`;
+          const key = fs.readFileSync(`${process.env.RUNNER_TEMP}/AuthKey_${process.env.ASC_KEY_ID}.p8`);
+          const sig = crypto.sign('sha256', Buffer.from(unsigned), { key, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+          const res = await fetch(`https://api.appstoreconnect.apple.com${path}`, {
+            method, body: body ?? undefined,
+            headers: { Authorization: `Bearer ${unsigned}.${sig}`, 'Content-Type': 'application/json' },
+          });
+          const text = await res.text();
+          if (!res.ok) { console.error(`ASC ${method} ${path} -> ${res.status} ${text.slice(0, 300)}`); process.exit(1); }
+          process.stdout.write(text || '{}');
+          JS
+
+      - name: Yerel sürüm numaralı uygulamada build numarasını TestFlight'ın üstüne çek
+        working-directory: src/${{ steps.app.outputs.subdir }}
+        run: |
+          set -euo pipefail
+          source=$(python3 -c 'import json; print(json.load(open("eas.json")).get("cli",{}).get("appVersionSource","remote"))')
+          if [ "$source" != "local" ]; then echo "Sürüm numarası EAS'te (remote); EAS kendisi artırır."; exit 0; fi
+          latest=$(node "$RUNNER_TEMP/asc.mjs" GET "/v1/builds?filter[app]=${{ steps.app.outputs.asc }}&sort=-uploadedDate&limit=1&fields[builds]=version" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d[0]["attributes"]["version"] if d else 0)')
+          next=$(( latest + 1 ))
+          echo "TestFlight'taki son build $latest -> bu derleme $next"
+          python3 - "$next" <<'PY'
+          import json, os, re, sys
+          n = sys.argv[1]
+          done = False
+          for name in ('app.config.ts', 'app.config.js'):
+              if os.path.exists(name):
+                  s = open(name, encoding='utf-8').read()
+                  s2, k = re.subn(r"(buildNumber\s*:\s*)['\"]\d+['\"]", rf"\g<1>'{n}'", s)
+                  if k: open(name, 'w', encoding='utf-8').write(s2); done = True
+          if os.path.exists('app.json'):
+              a = json.load(open('app.json', encoding='utf-8'))
+              ios = a.setdefault('expo', {}).setdefault('ios', {})
+              if 'buildNumber' in ios or not done:
+                  ios['buildNumber'] = n
+                  json.dump(a, open('app.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=2); done = True
+          if not done: sys.exit('buildNumber bulunamadı')
+          PY
+
+      - name: IPA derle (Mac üzerinde, EAS bulut kotası harcanmaz)
+        working-directory: src/${{ steps.app.outputs.subdir }}
+        run: |
+          set -euo pipefail
+          npx --yes eas-cli@latest build --platform ios --profile production --local --non-interactive --output "$RUNNER_TEMP/app.ipa"
+          ls -lh "$RUNNER_TEMP/app.ipa"
+          cd "$RUNNER_TEMP" && rm -rf ipa && mkdir ipa && unzip -q app.ipa -d ipa
+          plist=$(ls -d ipa/Payload/*.app)/Info.plist
+          echo "BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" >> "$GITHUB_ENV"
+
+      - name: TestFlight'a gönder (ekip anahtarıyla; Apple ID girişi istenmez)
+        working-directory: src/${{ steps.app.outputs.subdir }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          cfg = json.load(open('eas.json'))
+          ios = cfg.setdefault('submit', {}).setdefault('production', {}).setdefault('ios', {})
+          for k in ('appleId', 'appleTeamId', 'metadataPath'):
+              ios.pop(k, None)
+          ios['ascAppId'] = '${{ steps.app.outputs.asc }}'
+          ios['ascApiKeyPath'] = f"{os.environ['RUNNER_TEMP']}/AuthKey_{os.environ['ASC_KEY_ID']}.p8"
+          ios['ascApiKeyId'] = os.environ['ASC_KEY_ID']
+          ios['ascApiKeyIssuerId'] = os.environ['ASC_ISSUER_ID']
+          json.dump(cfg, open('eas.json', 'w'), indent=2)
+          PY
+          npx --yes eas-cli@latest submit --platform ios --profile production --path "$RUNNER_TEMP/app.ipa" --non-interactive
+          echo "Gönderildi: ${APP_VERSION} (${BUILD_NUMBER})"
+
+      - name: İşlenmesini bekle, iç test grubuna ve sahibe aç
+        run: |
+          set -euo pipefail
+          A="${{ steps.app.outputs.asc }}"
+          for i in $(seq 1 40); do
+            state=$(node "$RUNNER_TEMP/asc.mjs" GET "/v1/builds?filter[app]=$A&filter[version]=${BUILD_NUMBER}&fields[builds]=processingState" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d[0]["attributes"]["processingState"]+" "+d[0]["id"] if d else "YOK -")')
+            echo "[$i] işlenme: $state"
+            case "$state" in VALID*) break ;; INVALID*|FAILED*) echo "::error::Apple derlemeyi reddetti: $state"; exit 1 ;; esac
+            sleep 30
+          done
+          build_id=$(echo "$state" | awk '{print $2}')
+          [ "${state%% *}" = "VALID" ] || { echo "::warning::Apple işlemesi 20 dakikada bitmedi; TestFlight'a kendiliğinden düşecek."; exit 0; }
+          node "$RUNNER_TEMP/asc.mjs" GET "/v1/apps/$A/betaGroups?fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds" > groups.json
+          python3 - "$build_id" > plan.txt <<'PY'
+          import json, sys
+          for g in json.load(open('groups.json'))['data']:
+              a = g['attributes']
+              if a.get('isInternalGroup'):
+                  print(g['id'], 'all' if a.get('hasAccessToAllBuilds') else 'add', a['name'])
+          PY
+          while read -r gid mode name; do
+            if [ "$mode" = "add" ]; then
+              node "$RUNNER_TEMP/asc.mjs" POST "/v1/betaGroups/$gid/relationships/builds" "{\"data\":[{\"type\":\"builds\",\"id\":\"$build_id\"}]}" >/dev/null && echo "Derleme '$name' grubuna eklendi."
+            else
+              echo "'$name' grubu tüm derlemeleri otomatik alıyor."
+            fi
+            members=$(node "$RUNNER_TEMP/asc.mjs" GET "/v1/betaGroups/$gid/betaTesters?fields[betaTesters]=email&limit=200" | python3 -c 'import json,sys; print(" ".join((t["attributes"].get("email") or "").lower() for t in json.load(sys.stdin)["data"]))')
+            for email in $OWNER_TESTERS; do
+              case " $members " in *" $email "*) echo "$email zaten '$name' testçisi." ;;
+                *) node "$RUNNER_TEMP/asc.mjs" POST "/v1/betaTesters" "{\"data\":{\"type\":\"betaTesters\",\"attributes\":{\"email\":\"$email\"},\"relationships\":{\"betaGroups\":{\"data\":[{\"type\":\"betaGroups\",\"id\":\"$gid\"}]}}}}" >/dev/null && echo "$email '$name' grubuna testçi olarak eklendi." || echo "::warning::$email '$name' grubuna eklenemedi (iç gruplara yalnız ekip üyeleri girebilir)." ;;
+              esac
+            done
+          done < plan.txt
+          echo "### ${{ inputs.app }} ${APP_VERSION} (${BUILD_NUMBER}) TestFlight'ta" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Temizlik
+        if: always()
+        run: rm -rf "$HOME/.expo/state.json" "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/app.ipa" "$RUNNER_TEMP/ipa" src
