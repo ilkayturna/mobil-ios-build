@@ -15,7 +15,7 @@ on:
       app:
         description: 'Uygulama'
         type: choice
-        options: [trader-mobile, nucum, sentineltime]
+        options: [trader-mobile, nucum, sentineltime, gulusum]
       ref:
         description: 'Dal ya da commit (boş = uygulamanın varsayılan dalı)'
         default: ''
@@ -51,6 +51,9 @@ jobs:
             # alır; yerel .env'leri (geliştirme adresleri, sunucu anahtarları) derlemeye asla girmez.
             nucum)         repo=ilkayturna/Nuc-m;         branch=main;   subdir=.;      envfile=-;          envkey=NONE;          asc=6781225793 ;;
             sentineltime)  repo=ilkayturna/Jira-Worklog;  branch=main;   subdir=mobile; envfile=-;          envkey=NONE;          asc=6806598315 ;;
+            # Gülüşüm (diş kliniği uygulaması): kaynak ksmkrbs/dis-klinik-platform `mobile/`; EXPO_PUBLIC_ yok,
+            # hasta kliniğin adresini uygulamada girer. Kaynak deposuna bu hesabın yazma yetkisi var.
+            gulusum)       repo=ksmkrbs/dis-klinik-platform; branch=mobil-uygulama; subdir=mobile; envfile=-; envkey=NONE; asc=6826830762 ;;
             *) echo "::error::Kayıtsız uygulama: ${{ inputs.app }}"; exit 1 ;;
           esac
           ref="${{ inputs.ref }}"; [ -n "$ref" ] || ref="$branch"
