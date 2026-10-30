@@ -184,10 +184,29 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ inputs.app }}" = "cantakip" ]; then
-            # Yeni uygulama: dağıtım sertifikası/profil EAS sunucusunda yoksa ekip ASC anahtarıyla üretilsin (Apple ID girişi yok).
-            export EXPO_ASC_API_KEY_PATH="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8" EXPO_ASC_KEY_ID="$ASC_KEY_ID" EXPO_ASC_ISSUER_ID="$ASC_ISSUER_ID" EXPO_APPLE_TEAM_ID=6FR2S79P48
+            # EAS'te kimlik bilgisi olmayan uygulama: EAS etkileşimsiz modda sertifika üretmiyor. Bunun yerine Xcode
+            # otomatik imzalama + ekip ASC anahtarı (bulut imzalama) kullanılır; Apple ID girişi gerekmez.
+            npx expo prebuild --platform ios --clean --no-install
+            (cd ios && pod install)
+            ws=$(ls -d ios/*.xcworkspace | head -1); scheme=$(basename "$ws" .xcworkspace)
+            AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+            xcodebuild -quiet -workspace "$ws" -scheme "$scheme" -configuration Release -destination 'generic/platform=iOS'               -archivePath "$RUNNER_TEMP/app.xcarchive" "${AUTH[@]}" DEVELOPMENT_TEAM=6FR2S79P48 CODE_SIGN_STYLE=Automatic archive
+            cat > "$RUNNER_TEMP/export.plist" <<'PL'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>6FR2S79P48</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>destination</key><string>export</string>
+            <key>uploadSymbols</key><true/>
+          </dict></plist>
+          PL
+            xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/app.xcarchive" -exportPath "$RUNNER_TEMP/export"               -exportOptionsPlist "$RUNNER_TEMP/export.plist" "${AUTH[@]}"
+            cp "$RUNNER_TEMP"/export/*.ipa "$RUNNER_TEMP/app.ipa"
+          else
+            npx --yes eas-cli@latest build --platform ios --profile production --local --non-interactive --output "$RUNNER_TEMP/app.ipa"
           fi
-          npx --yes eas-cli@latest build --platform ios --profile production --local --non-interactive --output "$RUNNER_TEMP/app.ipa"
           ls -lh "$RUNNER_TEMP/app.ipa"
           cd "$RUNNER_TEMP" && rm -rf ipa && mkdir ipa && unzip -q app.ipa -d ipa
           plist=$(ls -d ipa/Payload/*.app)/Info.plist
