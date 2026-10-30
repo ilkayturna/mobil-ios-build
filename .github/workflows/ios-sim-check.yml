@@ -52,7 +52,7 @@ jobs:
           sum=$(find mobile/app mobile/src mobile/assets mobile/app.config.ts mobile/eas.json mobile/package-lock.json shared -type f -not -name '*.test.*' -print0 | sort -z | xargs -0 shasum | shasum | cut -c1-16)
           echo "value=sim-$sum" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         id: cache
         with:
           path: ${{ runner.temp }}/sim
@@ -84,6 +84,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/sim.tar.gz" -C "$RUNNER_TEMP/sim"
           ls "$RUNNER_TEMP/sim"
 
+      # Derleme, gezi takılsa da saklanır: gezi dosyası değişince 20 dakikalık derleme yinelenmez.
+      - uses: actions/cache/save@v4
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/sim
+          key: ${{ steps.key.outputs.value }}
+
       - name: Maestro
         run: |
           set -euo pipefail
@@ -113,7 +120,7 @@ jobs:
               xcrun simctl ui "$udid" appearance "$theme"
               dir="$out/$label-$theme"
               mkdir -p "$dir"
-              if ! maestro --device "$udid" test -e SHOTS="$dir" --format junit --output "$dir/rapor.xml" --debug-output "$dir/debug" .maestro/tour.yaml; then
+              if ! maestro --device "$udid" test --test-output-dir "$dir" --format junit --output "$dir/rapor.xml" .maestro/tour.yaml; then
                 echo "::error::$label $theme gezisi takıldı"
                 status=1
               fi
