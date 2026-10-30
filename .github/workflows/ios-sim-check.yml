@@ -1,0 +1,138 @@
+name: ios-sim-check
+# SentinelTime'ı gerçek iOS simülatöründe açar: derler, kurar, demoyu baştan sona gezer, ekran görüntüsü alır.
+# Windows'ta simülatör yok; mağazaya göndermeden önceki tek gerçek çalıştırma budur. Yalnız demo modu gezilir,
+# Jira'ya ve gerçek hesaba dokunulmaz. Derlenen uygulama herkese açık yüklenmez, yalnız bu deponun önbelleğinde
+# durur; dışarı çıkan tek şey demo verili ekran görüntüleridir (3 gün saklanır).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Jira-Worklog dal ya da commit'
+        default: 'main'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-sim-sentineltime
+  cancel-in-progress: true
+
+env:
+  CI: "1"
+  EXPO_NO_TELEMETRY: "1"
+
+jobs:
+  check:
+    runs-on: macos-26
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ilkayturna/Jira-Worklog
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Derleme anahtarı (yalnız uygulamayı etkileyen dosyalar)
+        id: key
+        working-directory: src
+        run: |
+          set -euo pipefail
+          sum=$(find mobile/app mobile/src mobile/assets mobile/app.config.ts mobile/eas.json mobile/package-lock.json shared -type f -not -name '*.test.*' -print0 | sort -z | xargs -0 shasum | shasum | cut -c1-16)
+          echo "value=sim-$sum" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: ${{ runner.temp }}/sim
+          key: ${{ steps.key.outputs.value }}
+
+      - name: Bağımlılıklar
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: src/mobile
+        run: npm ci
+
+      - name: Expo oturumu
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          EXPO_STATE_JSON: ${{ secrets.EXPO_STATE_JSON }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.expo"
+          umask 077
+          printf '%s' "$EXPO_STATE_JSON" > "$HOME/.expo/state.json"
+          npx --yes eas-cli@latest whoami
+
+      - name: Simülatör için derle
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: src/mobile
+        run: |
+          set -euo pipefail
+          npx --yes eas-cli@latest build --platform ios --profile simulator --local --non-interactive --output "$RUNNER_TEMP/sim.tar.gz"
+          mkdir -p "$RUNNER_TEMP/sim"
+          tar -xzf "$RUNNER_TEMP/sim.tar.gz" -C "$RUNNER_TEMP/sim"
+          ls "$RUNNER_TEMP/sim"
+
+      - name: Maestro
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Simülatörde gez (iPhone ve iPad, açık ve koyu)
+        working-directory: src/mobile
+        env:
+          MAESTRO_CLI_NO_ANALYTICS: "1"
+        run: |
+          set -uo pipefail
+          app=$(ls -d "$RUNNER_TEMP"/sim/*.app | head -1)
+          out="$RUNNER_TEMP/shots"
+          mkdir -p "$out"
+          xcrun simctl list devices available | grep -E "iPhone|iPad" | head -40
+          status=0
+          run_device() {
+            name="$1"; label="$2"
+            udid=$(xcrun simctl list devices available | grep -F "$name (" | head -1 | grep -oE '[0-9A-F-]{36}')
+            [ -n "$udid" ] || { echo "::error::Simülatör yok: $name"; status=1; return; }
+            xcrun simctl boot "$udid" || true
+            xcrun simctl bootstatus "$udid" -b
+            xcrun simctl status_bar "$udid" override --time 9:41 --dataNetwork wifi --wifiMode active --wifiBars 3 --cellularMode active --cellularBars 4 --batteryState charged --batteryLevel 100
+            xcrun simctl install "$udid" "$app"
+            for theme in light dark; do
+              xcrun simctl ui "$udid" appearance "$theme"
+              dir="$out/$label-$theme"
+              mkdir -p "$dir"
+              if ! maestro --device "$udid" test -e SHOTS="$dir" --format junit --output "$dir/rapor.xml" --debug-output "$dir/debug" .maestro/tour.yaml; then
+                echo "::error::$label $theme gezisi takıldı"
+                status=1
+              fi
+            done
+            xcrun simctl spawn "$udid" log show --last 20m --predicate 'process == "SentinelTimeAI" AND messageType == fault' --style compact > "$out/$label-fault.log" 2>/dev/null || true
+            cp -f "$HOME/Library/Logs/DiagnosticReports/"*Sentinel* "$out/" 2>/dev/null || true
+            xcrun simctl shutdown "$udid" || true
+          }
+          iphone=$(xcrun simctl list devices available | grep -oE "iPhone [0-9]+ Pro Max" | sort -V | tail -1)
+          ipad=$(xcrun simctl list devices available | grep -oE "iPad Pro 13-inch \(M[0-9]+\)" | sort -V | tail -1)
+          run_device "$iphone" iphone
+          run_device "$ipad" ipad
+          find "$out" -name '*.png' | wc -l
+          exit "$status"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ekranlar
+          path: ${{ runner.temp }}/shots
+          retention-days: 3
+          if-no-files-found: warn
