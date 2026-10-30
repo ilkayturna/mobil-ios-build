@@ -54,9 +54,9 @@ jobs:
             # Gülüşüm (diş kliniği uygulaması): kaynak ksmkrbs/dis-klinik-platform `mobile/`; EXPO_PUBLIC_ yok,
             # hasta kliniğin adresini uygulamada girer. Kaynak deposuna bu hesabın yazma yetkisi var.
             gulusum)       repo=ksmkrbs/dis-klinik-platform; branch=mobil-uygulama; subdir=mobile; envfile=-; envkey=NONE; asc=6826830762 ;;
-            # Can Takip (aile uygulaması): EXPO_PUBLIC_ ayarı ENV_CAN_TAKIP sırrından gelir.
+            # Can Takip (aile uygulaması): EXPO_PUBLIC_ ayarı yok.
             # asc: App Store Connect'te uygulama oluşturulunca 'Apple ID' numarası buraya ve eas.json'a yazılır.
-            cantakip)      repo=ilkayturna/can-takip-mobil; branch=main; subdir=.; envfile=.env.local; envkey=CAN_TAKIP; asc=6829019861 ;;
+            cantakip)      repo=ilkayturna/can-takip-mobil; branch=main; subdir=.; envfile=-; envkey=NONE; asc=6829019861 ;;
             *) echo "::error::Kayıtsız uygulama: ${{ inputs.app }}"; exit 1 ;;
           esac
           case "$asc" in *[!0-9]*|"") echo "::error::${{ inputs.app }} için App Store Connect uygulama numarası (asc) henüz yazılmadı."; exit 1 ;; esac
@@ -183,6 +183,10 @@ jobs:
         working-directory: src/${{ steps.app.outputs.subdir }}
         run: |
           set -euo pipefail
+          if [ "${{ inputs.app }}" = "cantakip" ]; then
+            # Yeni uygulama: dağıtım sertifikası/profil EAS sunucusunda yoksa ekip ASC anahtarıyla üretilsin (Apple ID girişi yok).
+            export EXPO_ASC_API_KEY_PATH="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8" EXPO_ASC_KEY_ID="$ASC_KEY_ID" EXPO_ASC_ISSUER_ID="$ASC_ISSUER_ID" EXPO_APPLE_TEAM_ID=6FR2S79P48
+          fi
           npx --yes eas-cli@latest build --platform ios --profile production --local --non-interactive --output "$RUNNER_TEMP/app.ipa"
           ls -lh "$RUNNER_TEMP/app.ipa"
           cd "$RUNNER_TEMP" && rm -rf ipa && mkdir ipa && unzip -q app.ipa -d ipa
