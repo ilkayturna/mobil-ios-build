@@ -1,0 +1,59 @@
+name: asc-release
+# Bir uygulamanın hazırlanan App Store sürümüne ekran görüntülerini yükler, derlemeyi bağlar ve istenirse
+# incelemeye gönderir. Elle tetiklenir. Ekip anahtarı yalnız ASC_API_KEY_P8 sırrındadır, hiçbir yere yazılmaz.
+on:
+  workflow_dispatch:
+    inputs:
+      asc:
+        description: 'App Store Connect uygulama numarası'
+        required: true
+      shots_run:
+        description: 'Ekran görüntülerinin alındığı ios-sim-check iş numarası (boş = yükleme yok)'
+        default: ''
+      shots:
+        description: 'Sırayla dosya adları, virgülle (uzantısız)'
+        default: ''
+      build:
+        description: 'Bağlanacak build numarası (boş = bağlama yok)'
+        default: ''
+      submit:
+        description: 'Incelemeye gönder'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  ASC_KEY_ID: CXPU6U2KBL
+  ASC_ISSUER_ID: 5b6c9543-dce8-438d-8c9e-194a3b31de36
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Ekran görüntülerini al
+        if: inputs.shots_run != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ekranlar
+          path: shots
+          run-id: ${{ inputs.shots_run }}
+          github-token: ${{ github.token }}
+
+      - name: App Store Connect
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_APP: ${{ inputs.asc }}
+          SHOTS: ${{ inputs.shots }}
+          BUILD: ${{ inputs.build }}
+          SUBMIT: ${{ inputs.submit }}
+        run: node .github/scripts/asc-release.mjs
