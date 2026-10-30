@@ -186,11 +186,12 @@ jobs:
           if [ "${{ inputs.app }}" = "cantakip" ]; then
             # EAS'te kimlik bilgisi olmayan uygulama: EAS etkileşimsiz modda sertifika üretmiyor. Bunun yerine Xcode
             # otomatik imzalama + ekip ASC anahtarı (bulut imzalama) kullanılır; Apple ID girişi gerekmez.
+            # Arşiv imzasız alınır (geliştirme profili kayıtlı cihaz ister); dağıtım imzasını dışa aktarma atar.
             npx expo prebuild --platform ios --clean --no-install
             (cd ios && pod install)
             ws=$(ls -d ios/*.xcworkspace | head -1); scheme=$(basename "$ws" .xcworkspace)
             AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
-            xcodebuild -quiet -workspace "$ws" -scheme "$scheme" -configuration Release -destination 'generic/platform=iOS'               -archivePath "$RUNNER_TEMP/app.xcarchive" "${AUTH[@]}" DEVELOPMENT_TEAM=6FR2S79P48 CODE_SIGN_STYLE=Automatic archive
+            xcodebuild -quiet -workspace "$ws" -scheme "$scheme" -configuration Release -destination 'generic/platform=iOS'               -archivePath "$RUNNER_TEMP/app.xcarchive" DEVELOPMENT_TEAM=6FR2S79P48 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO archive
             cat > "$RUNNER_TEMP/export.plist" <<'PL'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
