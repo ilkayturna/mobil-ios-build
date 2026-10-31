@@ -1,0 +1,75 @@
+name: testflight-yenile
+# TestFlight derlemeleri yüklendikten 90 gün sonra sona erer ve testçiler uygulamayı açamaz hâle gelir.
+# Bu iş her pazartesi her uygulamanın TestFlight'taki son derlemesine bakar; süresi 14 günden az kaldıysa
+# (ya da dolduysa) ios.yml'yi o uygulama için varsayılan daldan yeniden başlatır.
+# TestFlight'ta hiç derlemesi olmayan uygulamaya dokunmaz (ilk derleme sahibin kararıdır).
+# Linux makinede koşar (ücretsiz, Mac dakikası harcamaz); yalnız ASC okur ve ios.yml'yi tetikler.
+on:
+  schedule:
+    - cron: '0 5 * * 1'   # pazartesi 08:00 (TR)
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+env:
+  ASC_KEY_ID: CXPU6U2KBL
+  ASC_ISSUER_ID: 5b6c9543-dce8-438d-8c9e-194a3b31de36
+  KALAN_GUN: '14'
+  # uygulama=ASC numarası (ios.yml "Uygulama" adımıyla aynı liste)
+  APPS: >-
+    trader-mobile=6824197050
+    nucum=6781225793
+    sentineltime=6806598315
+    gulusum=6826830762
+    cantakip=6829019861
+
+jobs:
+  kontrol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Süresi dolan derlemeleri yenile
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ -n "$ASC_API_KEY_P8" ] || { echo "::error::ASC_API_KEY_P8 sırrı yok."; exit 1; }
+          umask 077
+          printf '%s' "$ASC_API_KEY_P8" > "$RUNNER_TEMP/key.p8"
+          cat > "$RUNNER_TEMP/asc.mjs" <<'JS'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          const [, , path] = process.argv;
+          const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+          const now = Math.floor(Date.now() / 1000);
+          const unsigned = `${b64({ alg: 'ES256', kid: process.env.ASC_KEY_ID, typ: 'JWT' })}.${b64({ iss: process.env.ASC_ISSUER_ID, iat: now, exp: now + 600, aud: 'appstoreconnect-v1' })}`;
+          const sig = crypto.sign('sha256', Buffer.from(unsigned), { key: fs.readFileSync(`${process.env.RUNNER_TEMP}/key.p8`), dsaEncoding: 'ieee-p1363' }).toString('base64url');
+          const res = await fetch(`https://api.appstoreconnect.apple.com${path}`, { headers: { Authorization: `Bearer ${unsigned}.${sig}` } });
+          if (!res.ok) { console.error(`ASC ${path} -> ${res.status}`); process.exit(1); }
+          process.stdout.write(await res.text());
+          JS
+          echo "| Uygulama | Son derleme | Bitiş | Kalan gün | İşlem |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for pair in $APPS; do
+            app=${pair%%=*}; asc=${pair#*=}
+            json=$(node "$RUNNER_TEMP/asc.mjs" "/v1/builds?filter[app]=$asc&sort=-uploadedDate&limit=1&fields[builds]=version,uploadedDate,expirationDate,expired") || { echo "::warning::$app okunamadı"; continue; }
+            read -r surum bitis kalan <<<"$(python3 -c '
+          import json, sys, datetime as dt
+          d = json.loads(sys.argv[1])["data"]
+          if not d: print("- - -"); sys.exit()
+          a = d[0]["attributes"]
+          b = dt.datetime.fromisoformat(a["expirationDate"].replace("Z", "+00:00"))
+          k = -1 if a.get("expired") else (b - dt.datetime.now(dt.timezone.utc)).days
+          print(a["version"], b.date(), k)' "$json")"
+            if [ "$kalan" = "-" ]; then islem="derleme yok, atlandı"
+            elif [ "$kalan" -lt "$KALAN_GUN" ]; then
+              gh workflow run ios.yml -f app="$app" && islem="yeniden derleme başlatıldı" || islem="başlatılamadı"
+            else islem="gerek yok"; fi
+            echo "$app: son $surum, bitiş $bitis, kalan $kalan gün -> $islem"
+            echo "| $app | $surum | $bitis | $kalan | $islem |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          rm -f "$RUNNER_TEMP/key.p8"

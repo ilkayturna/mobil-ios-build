@@ -8,7 +8,7 @@ name: ios-testflight
 # silinir. Sırları sahibi kendi bilgisayarında C:\aih\skills\mobil-ios-build\sirlari-yaz.ps1 ile yazar.
 #
 # Uygulama kaydı aşağıdaki "Uygulama" adımındadır: yeni uygulama = yeni bir `case` + sır betiğindeki
-# apps.json satırı.
+# apps.json satırı + yenile.yml'deki APPS listesi (90 günlük süre dolmadan otomatik yeniden derleme).
 on:
   workflow_dispatch:
     inputs:
@@ -252,8 +252,17 @@ jobs:
               a = g['attributes']
               if a.get('isInternalGroup'):
                   print(g['id'], 'all' if a.get('hasAccessToAllBuilds') else 'add', a['name'])
+              else:
+                  print(g['id'], 'ext', a['name'])
           PY
+          ext=0
           while read -r gid mode name; do
+            if [ "$mode" = "ext" ]; then
+              # Dış grup (ör. aile, herkese açık bağlantı): yeni derleme gruba eklenir ve aşağıda Apple beta incelemesine gönderilir.
+              node "$RUNNER_TEMP/asc.mjs" POST "/v1/betaGroups/$gid/relationships/builds" "{\"data\":[{\"type\":\"builds\",\"id\":\"$build_id\"}]}" >/dev/null \
+                && { echo "Derleme dış grup '$name'e eklendi."; ext=1; } || echo "::warning::Derleme dış grup '$name'e eklenemedi."
+              continue
+            fi
             if [ "$mode" = "add" ]; then
               node "$RUNNER_TEMP/asc.mjs" POST "/v1/betaGroups/$gid/relationships/builds" "{\"data\":[{\"type\":\"builds\",\"id\":\"$build_id\"}]}" >/dev/null && echo "Derleme '$name' grubuna eklendi."
             else
@@ -266,6 +275,11 @@ jobs:
               esac
             done
           done < plan.txt
+          if [ "$ext" = 1 ]; then
+            node "$RUNNER_TEMP/asc.mjs" POST "/v1/betaAppReviewSubmissions" "{\"data\":{\"type\":\"betaAppReviewSubmissions\",\"relationships\":{\"build\":{\"data\":{\"type\":\"builds\",\"id\":\"$build_id\"}}}}}" >/dev/null \
+              && echo "Dış testçiler için Apple beta incelemesine gönderildi." \
+              || echo "::warning::Beta incelemesine gönderilemedi; App Store Connect'te derlemeyi açıp 'Submit for Review'a basılmalı."
+          fi
           echo "### ${{ inputs.app }} ${APP_VERSION} (${BUILD_NUMBER}) TestFlight'ta" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Temizlik
